@@ -32,6 +32,7 @@ local invalidPrice=1e99
 local invalidDate=1e99
 local invalidQty=1e99
 local cacheVersion=11
+local filterCacheVersion=1
 local debugBuffer={context=''}
 local webCacheLastId=nil
 
@@ -55,6 +56,7 @@ local const={
   regexOrderCodeNew="([D%d]%d%d%-%d%d%d%d%d%d%d%-%d%d%d%d%d%d%d)",
   regexPriceOld="EUR%s+(%d+),(%d%d)",
   regexPriceNew="€(%d+),(%d%d)",
+  regexPriceEur="(%d+),(%d%d)%s*€",
   str2date = {
     Januar=1,
     January=1,
@@ -91,6 +93,8 @@ local const={
   xpathOrderMonthForm="//form[contains(@action,'order')][.//option]",
   xpathOrderMonthSelect='//select[@name="orderFilter" or @name="timeFilter"]',
   orderListLink='/gp/your-account/order-history?unifiedOrders=1',
+  orderDetailsUrl='/your-orders/order-details?orderID=',
+  messageCenterUrl='/gp/msg/cntr/v2/c/',
   monthlyContra="monthy contra",
   yearlyContra="yearly contra",
   daysByMonth={31,28,31,30,31,30,31,31,30,31,30,31}
@@ -152,6 +156,13 @@ if LocalStorage ~=nil then
     LocalStorage.cacheVersion = cacheVersion
   end
 
+  -- order filters scanned with the unparsed 2024+ order list were cached as complete, rescan them once
+  if LocalStorage.filterCacheVersion ~= filterCacheVersion then
+    print("clean filter cache...")
+    LocalStorage.orderFilterCache={}
+    LocalStorage.filterCacheVersion = filterCacheVersion
+  end
+
   if config.cleanOrdersCache and LocalStorage ~=nil then
     config.cleanOrdersCache=false
     configDirty=true
@@ -196,7 +207,7 @@ if debug ~= nil then
 end
 local baseurl='https://www'..const.domain
 
-WebBanking{version  = 1.23,
+WebBanking{version  = 1.24,
   url         = baseurl,
   services    = const.services,
   description = const.description}
@@ -531,6 +542,7 @@ function getDate(text)
   if type(text)~='string' then
     return invalidDate
   end
+  text=text:gsub("\194\160"," ")
   local day,month,year=string.match(text,"(%d+)%.%s+([%S]+)%s+(%d+)")
   if day == nil then
     day,month,year=string.match(text,"(%d+)%s+([%S]+)%s+(%d+)")
@@ -547,9 +559,14 @@ function getPrice(text)
   if type(text)~='string' then
     return invalidPrice
   end
-  local amountHigh,amountLow=string.match(text:gsub("%.",""),const.regexPriceNew)
+  text=text:gsub("\194\160"," "):gsub("%.","")
+  local amountHigh,amountLow=string.match(text,const.regexPriceNew)
   if amountHigh == nil or amountLow == nil then
-    amountHigh,amountLow=string.match(text:gsub("%.",""),const.regexPriceOld)
+    -- 2024+ layout: "12,34 €"
+    amountHigh,amountLow=string.match(text,const.regexPriceEur)
+  end
+  if amountHigh == nil or amountLow == nil then
+    amountHigh,amountLow=string.match(text,const.regexPriceOld)
   end
   --debugBuffer.print(text,amountHigh,amountLow)
   if amountHigh == nil or amountLow == nil then
@@ -660,6 +677,60 @@ function getOrderInfosFromSummaryHeader(orderInfo,order)
   end
 
   return order.orderCode ~= nil
+end
+
+-- 2024+ layout: order cards show date and total, but no prices of the articles
+function getOrderInfosFromOrderCard(orderCard,order)
+  order.orderCode=getOrderCode(orderCard:attr('data-csa-c-slot-id'))
+  if order.orderCode == nil then
+    order.orderCode=getOrderCode(orderCard:xpath('.//*[contains(@class,"yohtmlc-order-id")]'):text())
+  end
+  if order.orderCode == nil then
+    return false
+  end
+  debugBuffer.context=order.orderCode
+
+  order.bookingDate=invalidDate
+  order.orderTotal=invalidPrice
+  orderCard:xpath('.//li[contains(@class,"order-header__header-list-item")]//span[contains(@class,"a-size-base")]'):each(function(index,element)
+    if order.bookingDate == invalidDate then
+      order.bookingDate=getDate(element:text())
+    end
+    if order.orderTotal == invalidPrice then
+      order.orderTotal=getPrice(element:text())
+    end
+  end)
+
+  order.detailsUrl=orderCard:xpath('.//a[contains(@href,"/order-details")]'):attr('href')
+  if order.detailsUrl == "" then
+    order.digitalUrl=orderCard:xpath('.//a[contains(@href,"/digital/")]'):attr('href')
+    if order.digitalUrl == "" then
+      order.digitalUrl=nil
+      order.detailsUrl=const.orderDetailsUrl..order.orderCode
+    end
+  end
+
+  if order.digitalUrl ~= nil then
+    -- no details page for digital orders, book the total on the titles
+    if order.bookingDate == invalidDate or order.orderTotal == invalidPrice then
+      debugBuffer.print("getOrderInfosFromOrderCard digital order without date or total")
+      return false
+    end
+    local titles={}
+    orderCard:xpath('.//div[contains(@class,"yohtmlc-product-title")]'):each(function(index,element)
+      table.insert(titles,element:text())
+    end)
+    if #titles > 0 then
+      table.insert(order.orderPositions,{purpose=table.concat(titles,", "),amount=order.orderTotal,qty=1})
+      order.orderSum=order.orderTotal
+    end
+  else
+    -- date and total may be missing in the card, positions are only on the details page
+    order.needsDetails=true
+    order.detailsDate=0
+  end
+
+  return true
 end
 
 function isShipmentShorted(shipment)
@@ -853,6 +924,114 @@ function getOrderaddress(orderDetails,order)
   end
 end
 
+function isNewOrderDetails(orderDetails)
+  return nodeExists(orderDetails,'.//*[@data-component="purchasedItemsRightGrid"]')
+end
+
+--- @function getOrderDetailsNew
+-- 2024+ layout: articles are data-component blocks, totals and refunds are od-line-item-rows
+-- @param #table orderDetails
+-- @param #order order
+-- @return #boolean all data found
+function getOrderDetailsNew(orderDetails,order)
+  local bookingDate=getDate(orderDetails:xpath('.//*[@data-component="orderDate"]'):text())
+  if bookingDate ~= invalidDate then
+    order.bookingDate=bookingDate
+  end
+
+  local orderTotal=invalidPrice
+  local lastBold=invalidPrice
+  local refundSum=invalidPrice
+  local refundRows=0
+  orderDetails:xpath('.//div[contains(concat(" ",normalize-space(@class)," ")," od-line-item-row ")]'):each(function(index,row)
+    local label=row:xpath('.//*[contains(@class,"od-line-item-row-label")]'):text()
+    local amount=getPrice(row:xpath('.//*[contains(@class,"od-line-item-row-content")]'):text())
+    if amount ~= invalidPrice then
+      if label:find("Erstattung") or label:find("Refund") then
+        if label:find("Summe") or label:find("Total") then
+          refundSum=amount
+        else
+          refundRows=refundRows+amount
+        end
+      else
+        if label:find("Gesamtsumme") or label:find("Grand Total") then
+          orderTotal=amount
+        end
+        if nodeExists(row,'.//*[contains(@class,"a-text-bold")]') then
+          lastBold=amount
+        end
+      end
+    end
+  end)
+  if orderTotal == invalidPrice then
+    orderTotal=lastBold
+  end
+  if orderTotal ~= invalidPrice then
+    order.orderTotal=orderTotal
+  end
+
+  -- the page has no refund date, book the not yet known part of the refund on the order date
+  if refundSum == invalidPrice then
+    refundSum=refundRows
+  end
+  if refundSum > 0 and order.bookingDate ~= invalidDate then
+    local refunded=0
+    for _,amounts in pairs(order.refundTransactions or {}) do
+      for amount,_ in pairs(amounts) do
+        refunded=refunded+amount
+      end
+    end
+    if refundSum > refunded then
+      makeBranch(order,{'refundTransactions',order.bookingDate,refundSum-refunded})
+    end
+  end
+
+  if #order.orderPositions == 0 then
+    local positions={}
+    local orderSum=0
+    local invalidArticles=false
+    orderDetails:xpath('.//*[@data-component="purchasedItemsRightGrid"]'):each(function(index,item)
+      local purpose=item:xpath('.//*[@data-component="itemTitle"]'):text()
+      local priceText=item:xpath('.//*[@data-component="unitPrice"]//*[contains(@class,"a-offscreen")]'):text()
+      if priceText == "" then
+        priceText=item:xpath('.//*[@data-component="unitPrice"]'):text()
+      end
+      local amount=getPrice(priceText)
+      local qtyText=item:xpath('ancestor::div[contains(concat(" ",normalize-space(@class)," ")," a-fixed-left-grid-inner ")][1]//div[contains(@class,"od-item-view-qty")]'):text()
+      if qtyText == "" then
+        qtyText=item:xpath('.//*[@data-component="quantity"]'):text()
+      end
+      local qty=tonumber(qtyText:match("%d+") or "1")
+      if purpose ~= "" and amount ~= invalidPrice and qty > 0 then
+        table.insert(positions,{purpose=purpose,amount=amount,qty=qty})
+        orderSum=orderSum+amount*qty
+      else
+        invalidArticles=true
+      end
+    end)
+    if invalidArticles or #positions == 0 then
+      debugBuffer.print("getOrderDetailsNew invalid articles")
+      return false
+    end
+    order.orderPositions=positions
+    order.orderSum=orderSum
+  end
+
+  if order.endToEndReference == nil then
+    local address={}
+    orderDetails:xpath('.//*[@data-component="shippingAddress"]//li'):each(function(index,li)
+      if li:text() ~= "" then
+        table.insert(address,li:text())
+      end
+    end)
+    if #address > 0 then
+      order.endToEndReference=table.concat(address," ")
+    end
+  end
+
+  return order.bookingDate ~= invalidDate and order.orderTotal ~= invalidPrice
+end
+
 --- @function getOrderDetails
 -- @param #order order
 -- @return
@@ -863,7 +1042,17 @@ function getOrderDetails(order)
     --debugBuffer.print("getOrderDetails")
     local html=connectShopWithCheck("GET",order.detailsUrl)
     local orderDetails=html:xpath('//div[contains(@id,"orderDetails")]')
-    if orderDetails:text() ~="" then
+    if orderDetails:text() ~="" and (order.needsDetails or isNewOrderDetails(orderDetails)) then
+      if getOrderDetailsNew(orderDetails,order) then
+        order.needsDetails=nil
+        order.detailsDate=os.time()+math.floor((math.random()*90+90)*24*60*60) -- distribute rescans randomly in future
+      elseif not order.needsDetails then
+        order.detailsDate=os.time()+math.floor((math.random()*90+90)*24*60*60)
+      else
+        -- keep detailsDate, retry with the next refresh
+        debugBuffer.print("getOrderDetails incomplete details",order.orderCode)
+      end
+    elseif orderDetails:text() ~="" then
       local totals=getTotalsFromDetails(html)
       --debugBuffer.print("total error",order.orderCode,"order",order.orderTotal , "totals",totals.orderTotal)
       local doInsert=#order.orderPositions == 0
@@ -893,6 +1082,17 @@ end
 
 function getOrdersFromSummary(html)
   local orders={}
+  html:xpath('//div[contains(concat(" ",normalize-space(@class)," ")," order-card ")]'):each(function(index,orderCard)
+    local order={orderPositions={},orderSum=0,refund=0,detailsDate=2} -- #order
+    if getOrderInfosFromOrderCard(orderCard,order) then
+      orders[order.orderCode]=order
+    end
+    debugBuffer.flush()
+    debugBuffer.context=''
+  end) -- orderCard
+  if next(orders) ~= nil then
+    return orders
+  end
   html:xpath('//div[contains(@id,"ordersContainer") or contains(@class,"orders-content-container")]//div[contains(@class," order") and  .//div[contains(@class," order-info")]]'):each(function(index,orderBox)
     local orderInfo=orderBox:xpath('.//div[contains(@class,"order-info")]')
     local order={orderPositions={},orderSum=0,refund=0,detailsDate=2} -- #order
@@ -917,147 +1117,58 @@ function getOrdersFromSummary(html)
   return orders
 end
 
-function getMessageListURL(ajaxToken,page,pageToken)
-  local url='/gp/message/ajax/message-list.html?'
-  local fields={
-    messageType='all',
-    startDateTime=1000,
-    endDateTime=3167942400000,
-    pageSize=10,
-    pageNum=page,
-    sourcePage='inbox',
-    isMobile=0,
-    pageToken=pageToken,
-    token=ajaxToken,
-    stringDebug='',
-    isDebug=''
-  }
-  if ajaxToken == nil then
-    -- https://www.amazon.de/gp/msg/cntr/message-list/?messageType=all&startDateTime=NaN&endDateTime=NaN&pageSize=10&pageNum=1&sourcePage=inbox&isMobile=0&token=stateData.token&stringDebug=&isDebug=
-    url='/gp/msg/cntr/message-list/?'
-    fields.startDateTime='NaN'
-    fields.endDateTime='NaN'
-    fields.token='stateData.token'
-  end
+-- message center v2, see MessageCenterBuzzAssetsV2 (msg_center_config)
+function getMessageCenterURL(path,fields)
+  fields.isMobile=0
+  fields.channel='EMAIL'
+  fields.token='stateData.token'
+  fields.stringDebug=''
+  fields.isDebug=''
   local t={}
   for k,v in pairs(fields) do
-    if v ~= nil then
-      table.insert(t,k..'='..MM.urlencode(v))
-    end
+    table.insert(t,k..'='..MM.urlencode(v))
   end
-  return url..table.concat(t,"&")
+  return const.messageCenterUrl..path..'?'..table.concat(t,"&")
 end
-
-function getMessageURL(ajaxToken,messageId,threadId,messageDateTime)
---https://www.amazon.de/gp/msg/cntr/message-content/?messageId=urn%3Artn%3Amsg%&threadId=&messageType=all&sourcePage=inbox&messageDateTime=16667&isMobile=0&token=stateData.token&stringDebug=&isDebug=
-  local url
-  local fields={
-    messageId=messageId,
-    threadId=threadId,
-    messageType='all',
-    sourcePage='inbox',
-    messageDateTime=messageDateTime,
-    isMobile=0,
-    token=ajaxToken,
-    stringDebug='',
-    isDebug=''
-  }
-  if ajaxToken == nil then
-    url='/gp/msg/cntr/message-content/?'
-    fields.token='stateData.token'
-  else
-    url='/gp/message/ajax/message-content.html?'
-  end
-  local t={}
-  for k,v in pairs(fields) do
-    if v ~= nil then
-      table.insert(t,k..'='..MM.urlencode(v))
-    end
-  end
-  return url..table.concat(t,"&")
-end
-
 
 function getMessageList(since)
   since=since*1000 -- in milliseconds
   local orderIds={}
-  local html=connectShop("GET","/gp/message")
-  local ajaxToken=html:xpath('//script[contains(@type,"a-state")]'):text()
-  ajaxToken=string.match(ajaxToken,'{"token":"([A-Za-z0-9]+)"}')
-  print("ajaxToken",ajaxToken)
-  if ajaxToken ~= "" then
-    local page=1
-    local messages={}
-    local nextPageToken
-    repeat
-      MM.printStatus("Get page",page,"from Amazon message center.")
-      local html
-      local noNextPage=true
-        --debugBuffer.print(page,json)
-      if ajaxToken ~= nil then
-        local json=connectShopJson("GET",getMessageListURL(ajaxToken,page,nextPageToken))
-        if json.html ~= nil then
-          html=HTML("<html><body>"..json['html'].."</html></body>")
-          json.html = nil
-        end
-        if json.nextPageToken~= nil then
-          nextPageToken=json.nextPageToken
-          noNextPage=true
-        end
-      else
-        html=connectShop("GET",getMessageListURL(ajaxToken,page,nextPageToken))
-        
-        nextPageToken=html:xpath("//div[@id='nextPageTokenValue']"):attr('data-val')
-        if nextPageToken ~= '' then
-          noNextPage=false
-        end
+  local messages={}
+  local numAll=0
+  local page=1
+  local pageToken
+  repeat
+    MM.printStatus("Get page",page,"from Amazon message center.")
+    local content,charset=connectShopRaw("GET",getMessageCenterURL('message-list',{pageToken=pageToken}))
+    local html=HTML("<html><body><table><tbody>"..content.."</tbody></table></body></html>",charset)
+    local newMessages=false
+    html:xpath('//*[@message-id and @message-sent-time-in-ms]'):each(function(index,row)
+      local messageSentTime=tonumber(row:attr('message-sent-time-in-ms'))
+      local messageId=row:attr('message-id')
+      if messageSentTime ~= nil and messageSentTime > since and messages[messageId] == nil then
+        messages[messageId]={messageSentTime=messageSentTime,originSource=row:attr('origin-source')}
+        numAll=numAll+1
+        newMessages=true
       end
-      --debugBuffer.flush()
-      
-      local newMessages=false
-      html:xpath('//td'):each(function(index,td)
-        local message={}
-        for _,k in pairs({'messageSentTime','message-sent-time-in-ms','messageId','message-id','threadId','thread-id'}) do
-          message[k]=td:attr(k:lower())
-        end
-        if message['message-sent-time-in-ms'] ~= '' then
-          message.messageSentTime=message['message-sent-time-in-ms']
-          message.threadId=message['threadId']
-          message.messageId=message['message-id']
-        end
-        if tonumber(message.messageSentTime) > since then
-          messages[message.messageId]=message
-          newMessages=true
-        end
-        debugBuffer.print(message)
-      end)
-      --debugBuffer.print(page,json)
-      if not newMessages then
-        noNextPage=true
-      end
-      page=page+1
-    until noNextPage
-    local numAll=0
-    local num=0
-    for _,v in pairs(messages) do
-      numAll=numAll+1
+    end)
+    pageToken=html:xpath('//*[@id="nextPageTokenValue"]'):attr('data-val')
+    page=page+1
+  until not newMessages or pageToken == ''
+
+  local num=0
+  for messageId,message in pairs(messages) do
+    num=num+1
+    MM.printStatus("Get Amazon message",num,"of",numAll)
+    local fields={messageId=messageId}
+    if message.originSource ~= '' then
+      fields.originSource=message.originSource
     end
-    for _,v in pairs(messages) do
-      num=num+1
-      MM.printStatus("Get Amazon message",num,"of",numAll)
-      local html
-      if ajaxToken ~= nil then
-        local json=connectShopJson("GET",getMessageURL(ajaxToken,v.messageId,v.threadId,v.messageSentTime))
-        if json.html ~= nil then
-          html=HTML("<html><body>"..json['html'].."</html></body>")
-        else
-          html=''
-        end
-      else
-        html=connectShop("GET",getMessageURL(ajaxToken,v.messageId,v.threadId,v.messageSentTime))
-      end
-      for orderId in html:html():gmatch(const.regexOrderCodeNew) do
-        orderIds[orderId]=tonumber(v.messageSentTime)/1000 -- in milliseconds
+    local content=connectShopRaw("GET",getMessageCenterURL('message-content',fields))
+    for orderId in content:gmatch(const.regexOrderCodeNew) do
+      local messageTime=message.messageSentTime/1000
+      if orderIds[orderId] == nil or orderIds[orderId] < messageTime then
+        orderIds[orderId]=messageTime
       end
     end
   end
@@ -1615,16 +1726,22 @@ function RefreshAccount (account, since)
 
     local newestMessage=LocalStorage.newestMessage
 
-    for orderCode,messageTime in pairs(getMessageList(LocalStorage.newestMessage)) do
+    -- messages only trigger rescans, a changed message center must not break the refresh
+    local messagesOk,orderIds=pcall(getMessageList,LocalStorage.newestMessage)
+    if messagesOk then
+      for orderCode,messageTime in pairs(orderIds) do
 
-      if newestMessage<messageTime then
-        newestMessage=messageTime
+        if newestMessage<messageTime then
+          newestMessage=messageTime
+        end
+        if LocalStorage.OrderCache[orderCode] ~= nil then
+          LocalStorage.OrderCache[orderCode].detailsDate=1
+        end
       end
-      if LocalStorage.OrderCache[orderCode] ~= nil then
-        LocalStorage.OrderCache[orderCode].detailsDate=1
-      end
+      LocalStorage.newestMessage = newestMessage
+    else
+      print("skip Amazon message center:",tostring(orderIds))
     end
-    LocalStorage.newestMessage = newestMessage
 
     if LocalStorage.OrderCache[config.rescanOrder] ~= nil then
       LocalStorage.OrderCache[config.rescanOrder].detailsDate=1
@@ -1675,7 +1792,8 @@ function RefreshAccount (account, since)
   local balance=0
   local balancesByPeriod={}
   for orderCode,order in pairs(LocalStorage.OrderCache) do
-    if not blackListOrders[orderCode] then
+    -- orders from the 2024+ order list are reported when their details are read
+    if not blackListOrders[orderCode] and not order.needsDetails then
 
       -- orderPositions,{purpose=purpose,amount=amount,qty=qty})
       if not mixed then

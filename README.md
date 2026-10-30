@@ -1,4 +1,14 @@
 # Amazon Plugin for MoneyMoney
+
+## About this fork
+Version 1.24 adapts the plugin to the current amazon.de pages (2026):
+* Order list: the new order cards (`order-card`) are parsed. They no longer show article prices, so every new order is read from its details page and only reported once the details were parsed.
+* Order details: the new layout (`data-component` blocks, `od-line-item-row` totals, "Summe der Erstattung") is supported, the old layout is still parsed for older pages.
+* Message center: uses the new `/gp/msg/cntr/v2/` endpoints. A failing message center no longer aborts the refresh.
+* The order filter cache is cleared once, so periods scanned while parsing was broken are read again.
+
+Install the unsigned version from [this fork](https://raw.githubusercontent.com/jonathanlang/Amazon-MoneyMoney/master/amazon-orders.lua) as described below.
+
 ## Installation
 You can get the signed version from https://moneymoney-app.com/extensions/amazon-orders.lua. The unsigned [beta](https://raw.githubusercontent.com/Michael-Beutling/Amazon-MoneyMoney/beta/amazon-orders.lua) and [latest](https://raw.githubusercontent.com/Michael-Beutling/Amazon-MoneyMoney/master/amazon-orders.lua) versions are available from this repository.
 
