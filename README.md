@@ -3,7 +3,7 @@
 ## About this fork
 Version 1.24 adapts the plugin to the current amazon.de pages (2026):
 * Order list: the new order cards (`order-card`) are parsed. They no longer show article prices, so every new order is read from its details page and only reported once the details were parsed.
-* Order details: the new layout (`data-component` blocks, `od-line-item-row` totals, "Summe der Erstattung") is supported, the old layout is still parsed for older pages.
+* Order details: the new layout (`data-component` blocks, `od-line-item-row` totals, "Summe der Erstattung") is supported, the old layout is still parsed for older pages. Cancelled orders are recognized and not booked.
 * Message center: uses the new `/gp/msg/cntr/v2/` endpoints. A failing message center no longer aborts the refresh.
 * The order filter cache is cleared once, so periods scanned while parsing was broken are read again.
 

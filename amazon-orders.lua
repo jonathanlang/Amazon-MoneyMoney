@@ -943,7 +943,20 @@ function getOrderDetailsNew(orderDetails,order)
   local lastBold=invalidPrice
   local refundSum=invalidPrice
   local refundRows=0
-  orderDetails:xpath('.//div[contains(concat(" ",normalize-space(@class)," ")," od-line-item-row ")]'):each(function(index,row)
+  local rows=orderDetails:xpath('.//div[contains(concat(" ",normalize-space(@class)," ")," od-line-item-row ")]')
+
+  -- cancelled orders have no totals, nothing was charged
+  if rows:length() == 0 then
+    local status=orderDetails:xpath('.//*[@data-component="shipmentStatus"]'):text():lower()
+    if status:find("storniert") or status:find("cancel") then
+      order.orderPositions={}
+      order.orderSum=0
+      order.orderTotal=0
+      return order.bookingDate ~= invalidDate
+    end
+  end
+
+  rows:each(function(index,row)
     local label=row:xpath('.//*[contains(@class,"od-line-item-row-label")]'):text()
     local amount=getPrice(row:xpath('.//*[contains(@class,"od-line-item-row-content")]'):text())
     if amount ~= invalidPrice then
