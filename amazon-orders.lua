@@ -207,7 +207,7 @@ if debug ~= nil then
 end
 local baseurl='https://www'..const.domain
 
-WebBanking{version  = 1.24,
+WebBanking{version  = 1.25,
   url         = baseurl,
   services    = const.services,
   description = const.description}
@@ -1585,8 +1585,13 @@ function RefreshAccount (account, since)
   local mixed=false
   local periodly=false
   local now=os.time()
+  local fullHistory=nil
 
   webCacheState='RefreshAccount'
+
+  if LocalStorage.fullHistory == nil then
+    LocalStorage.fullHistory={}
+  end
 
   if type(account.attributes) == 'table' then
     LocalStorage.patcher={}
@@ -1624,6 +1629,11 @@ function RefreshAccount (account, since)
             booked = false,
           }
         }}
+      end
+      -- orders are only reported once, a recreated account can request all of them again
+      if k == 'fullHistory' and v ~= LocalStorage.fullHistory[account.accountNumber] then
+        print("report full order history")
+        fullHistory=v
       end
     end
   end
@@ -1800,6 +1810,10 @@ function RefreshAccount (account, since)
     LocalStorage.lastLoginCounter = LocalStorage.loginCounter
   else
     print("skip account scan")
+  end
+
+  if fullHistory then
+    since=0
   end
 
   local balance=0
@@ -2029,6 +2043,10 @@ function RefreshAccount (account, since)
     if v.accountNumber == nil then
       v.accountNumber=account.owner
     end
+  end
+
+  if fullHistory then
+    LocalStorage.fullHistory[account.accountNumber]=fullHistory
   end
 
   -- Return balance and array of transactions.

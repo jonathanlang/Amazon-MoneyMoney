@@ -7,6 +7,8 @@ Version 1.24 adapts the plugin to the current amazon.de pages (2026):
 * Message center: uses the new `/gp/msg/cntr/v2/` endpoints. A failing message center no longer aborts the refresh.
 * The order filter cache is cleared once, so periods scanned while parsing was broken are read again.
 
+Version 1.25 adds the `fullHistory` attribute, see [Report the full order history to a recreated account](#report-the-full-order-history-to-a-recreated-account).
+
 Install the unsigned version from [this fork](https://raw.githubusercontent.com/jonathanlang/Amazon-MoneyMoney/master/amazon-orders.lua) as described below.
 
 ## Installation
@@ -35,6 +37,10 @@ The script caches some data, but the first time it scrapes your whole order hist
 ## Reset cache to enforce full order history reload
 In MoneyMoney right-click the account, select settings, then notes. Add the attribute resetCache with any value, e.g. today's date.
 Going forward, whenever the attribute value gets changed, the cache is cleared and the whole account is reread.
+
+## Report the full order history to a recreated account
+Each order is reported only once: an account gets the orders the plugin has first seen since the start date MoneyMoney asks for (usually one year back). An account that is added again later therefore misses all older orders, because they are already in the cache.
+Add the attribute fullHistory with any value to the account, e.g. today's date. The next refresh reports the whole order history to this account only, without reading Amazon again. To repeat it, change the value.
 
 ## Blacklist invalid orders
 Orders that cause erros can be omitted via the blackListOrders attribute in the settings. Simply enter the order numbers separated by commas as a value. See screen shot above.
