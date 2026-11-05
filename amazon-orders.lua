@@ -207,7 +207,7 @@ if debug ~= nil then
 end
 local baseurl='https://www'..const.domain
 
-WebBanking{version  = 1.26,
+WebBanking{version  = 1.27,
   url         = baseurl,
   services    = const.services,
   description = const.description}
@@ -1586,6 +1586,7 @@ function RefreshAccount (account, since)
   local periodly=false
   local now=os.time()
   local fullHistory=nil
+  local hasFullHistory=false
 
   webCacheState='RefreshAccount'
 
@@ -1631,9 +1632,12 @@ function RefreshAccount (account, since)
         }}
       end
       -- orders are only reported once, a recreated account can request all of them again
-      if k == 'fullHistory' and v ~= LocalStorage.fullHistory[account.accountNumber] then
-        print("report full order history")
-        fullHistory=v
+      if k == 'fullHistory' then
+        hasFullHistory=true
+        if v ~= LocalStorage.fullHistory[account.accountNumber] then
+          print("report full order history")
+          fullHistory=v
+        end
       end
     end
   end
@@ -1992,7 +1996,8 @@ function RefreshAccount (account, since)
     -- debugBuffer.print("lastPeriod=",lastPeriod)
 
     for k,v in pairs(balancesByPeriod) do
-      if v.report then
+      -- an account with the whole history gets its contras with every refresh, known ones are ignored
+      if v.report or hasFullHistory then
         -- fullHistory fills an empty account, stored corrections are replaced by one contra
         if k == lastPeriod or fullHistory then
           LocalStorage.balancesByPeriod[k]={v.balance}
