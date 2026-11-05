@@ -207,7 +207,7 @@ if debug ~= nil then
 end
 local baseurl='https://www'..const.domain
 
-WebBanking{version  = 1.25,
+WebBanking{version  = 1.26,
   url         = baseurl,
   services    = const.services,
   description = const.description}
@@ -1993,7 +1993,8 @@ function RefreshAccount (account, since)
 
     for k,v in pairs(balancesByPeriod) do
       if v.report then
-        if k == lastPeriod then
+        -- fullHistory fills an empty account, stored corrections are replaced by one contra
+        if k == lastPeriod or fullHistory then
           LocalStorage.balancesByPeriod[k]={v.balance}
         else
           if LocalStorage.balancesByPeriod[k] == nil then
